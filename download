@@ -1,0 +1,118 @@
+"""
+Feature engineering for churn prediction.
+
+Design philosophy: raw columns from the CRM are weak predictors in isolation.
+The model learns more from relationships between features — charge-per-tenure,
+support velocity, contract proximity — than from any single raw column.
+"""
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import LabelEncoder
+from typing import Tuple, List
+
+
+RAW_NUMERIC = [
+    "tenure", "MonthlyCharges", "TotalCharges", "NumSupportCalls",
+    "NumProductChanges", "DaysSinceLastLogin",
+]
+RAW_CATEGORICAL = [
+    "Contract", "PaymentMethod", "InternetService",
+    "TechSupport", "OnlineSecurity", "DeviceProtection",
+]
+
+
+def engineer(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    # ── value / spend ratios ──────────────────────────────────────────────
+    df["avg_monthly_charge"] = df["TotalCharges"] / (df["tenure"] + 1)
+    df["charge_deviation"] = df["MonthlyCharges"] - df["avg_monthly_charge"]
+
+    # ── tenure features ───────────────────────────────────────────────────
+    df["tenure_band"] = pd.cut(
+        df["tenure"],
+        bins=[0, 6, 12, 24, 48, 9999],
+        labels=["0-6mo", "6-12mo", "1-2yr", "2-4yr", "4yr+"],
+    )
+    # months to contract renewal — high churn risk near renewal window
+    contract_lengths = {"Month-to-month": 1, "One year": 12, "Two year": 24}
+    df["contract_months"] = df["Contract"].map(contract_lengths).fillna(1)
+    df["months_to_renewal"] = df["contract_months"] - (df["tenure"] % df["contract_months"])
+    df["near_renewal"] = (df["months_to_renewal"] <= 2).astype(int)
+
+    # ── support behavior ──────────────────────────────────────────────────
+    df["support_call_rate"] = df.get("NumSupportCalls", 0) / (df["tenure"] + 1)
+    # customers who called repeatedly recently are a strong signal
+    df["high_support_user"] = (df.get("NumSupportCalls", 0) >= 3).astype(int)
+
+    # ── engagement signals ────────────────────────────────────────────────
+    df["low_engagement"] = (df.get("DaysSinceLastLogin", 0) > 14).astype(int)
+
+    # ── service count (customers with fewer services churn more) ──────────
+    service_cols = ["TechSupport", "OnlineSecurity", "DeviceProtection", "StreamingTV"]
+    df["service_count"] = sum(
+        (df[c] == "Yes").astype(int) for c in service_cols if c in df.columns
+    )
+
+    return df
+
+
+def get_feature_matrix(
+    df: pd.DataFrame,
+    encoders: dict = None,
+    fit_encoders: bool = True,
+) -> Tuple[pd.DataFrame, dict]:
+    """
+    Returns (X, encoders) where X is the model-ready feature matrix.
+    Pass encoders from training when scoring new data (fit_encoders=False).
+    """
+    df = engineer(df)
+
+    numeric_features = RAW_NUMERIC + [
+        "avg_monthly_charge", "charge_deviation", "months_to_renewal",
+        "near_renewal", "support_call_rate", "high_support_user",
+        "low_engagement", "service_count",
+    ]
+
+    if encoders is None:
+        encoders = {}
+
+    df_enc = df.copy()
+    for col in RAW_CATEGORICAL:
+        if col not in df_enc.columns:
+            continue
+        if fit_encoders:
+            le = LabelEncoder()
+            df_enc[col + "_enc"] = le.fit_transform(df_enc[col].astype(str))
+            encoders[col] = le
+        else:
+            le = encoders[col]
+            df_enc[col + "_enc"] = le.transform(df_enc[col].astype(str))
+
+    cat_features = [c + "_enc" for c in RAW_CATEGORICAL if c in df_enc.columns]
+    all_features = [f for f in numeric_features + cat_features if f in df_enc.columns]
+
+    return df_enc[all_features].fillna(0), encoders
+
+
+def temporal_split(
+    df: pd.DataFrame,
+    date_col: str,
+    train_months: int = 18,
+    val_months: int = 3,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Rolling-origin temporal split. Avoids data leakage from random splits.
+    Returns (train, val, test).
+    """
+    df = df.sort_values(date_col)
+    min_date = df[date_col].min()
+
+    train_cutoff = min_date + pd.DateOffset(months=train_months)
+    val_cutoff = train_cutoff + pd.DateOffset(months=val_months)
+
+    train = df[df[date_col] < train_cutoff]
+    val = df[(df[date_col] >= train_cutoff) & (df[date_col] < val_cutoff)]
+    test = df[df[date_col] >= val_cutoff]
+
+    return train, val, test

@@ -1,0 +1,34 @@
+model:
+  algorithm: xgboost
+  n_trials: 50            # Optuna hyperparameter search trials
+  cv_folds: 5
+  cv_strategy: temporal   # rolling-origin temporal CV
+  train_months: 18
+  val_months: 3
+  test_months: 3
+
+  # class weight / threshold
+  churn_rate_estimate: 0.15
+  threshold_fn_cost: 12   # false negative is 12x more costly than false positive
+
+  # XGBoost search space (Optuna)
+  xgb:
+    n_estimators: [200, 1000]
+    max_depth: [3, 8]
+    learning_rate: [0.01, 0.1]
+    subsample: [0.6, 1.0]
+    colsample_bytree: [0.6, 1.0]
+    min_child_weight: [1, 10]
+
+business:
+  outreach_capacity: 500   # max customers retention team can contact per week
+  revenue_col: MonthlyCharges
+  customer_id_col: customerID
+  date_col: signup_date
+  churn_col: Churn
+
+data:
+  train_path: data/churn_train.csv
+  score_path: data/new_customers.csv
+  output_path: data/scored_customers.csv
+  model_path: models/churn_model.pkl
